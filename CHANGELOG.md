@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.1.0] - 2026-11-05
+
+### Changed
+- Hard no longer needs trial and error. It used to need one-step "what
+  if" trials at a loose end (assume a rail, see it break), which is
+  guessing. Hard now uses the same reasoning as Medium (piece rules, line
+  counts, no closed loop), only much more of the loop reasoning: on 100
+  grids per size, 3.3 such steps on average at 6×6 (Medium: 1), 6.0 at
+  10×10 (Medium: 2.2). Medium now has a ceiling on those steps, so the
+  two levels no longer overlap.
+- 10×10 Hard builds much faster: under 0.03 s on a desktop at worst (about
+  0.6 s on a Kobo), from up to 0.27 s (about 7 s on a Kobo).
+- Medium and Hard grids differ from those of earlier versions, so the
+  Daily Challenge puzzle changes once for those levels.
+
 ## [1.0.5] - 2026-11-04
 
 ### Fixed
