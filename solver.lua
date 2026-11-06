@@ -17,9 +17,11 @@
 --           elsewhere; one with exactly enough room is full);
 --   tier 2  connectivity: an edge joining both ends of the same piece of
 --           track would close a loop, and joining the entrance's run to the
---           exit's run is only allowed when that uses up every track cell;
---   tier 3  one-step trial: assume an edge at a run's loose end, push tiers
---           1-2, and keep the opposite if that runs into a contradiction.
+--           exit's run is only allowed when that uses up every track cell.
+--
+-- There is no trial tier: no level ever needs "assume an edge and see if it
+-- breaks" (1.1.0; before, Hard needed exactly that). Hard is tier 2 like
+-- Medium, with many more tier-2 steps (see solveState()) and fewer givens.
 --
 -- Every rule is sound — it only ever removes possibilities the real answer
 -- does not use — so a grid the solver finishes has exactly one solution.
@@ -274,10 +276,11 @@ local function propagate1(st, ctx)
 end
 
 -- ---------------------------------------------------------------------------
--- Tier 2: connectivity. One pass; returns ok, changed.
+-- Tier 2: connectivity. One pass; returns ok, changed. first_only: stop at
+-- the first edge ruled out (tier-2 steps are counted one by one).
 -- ---------------------------------------------------------------------------
 
-local function l2pass(st, ctx)
+local function l2pass(st, ctx, first_only)
     local g, E, P = ctx.g, st.E, st.P
     local changed = false
     local ra, rb = find(P, ctx.a_cell), find(P, ctx.b_cell)
@@ -297,9 +300,11 @@ local function l2pass(st, ctx)
             local x, y = find(P, g.ea[e]), find(P, g.eb[e])
             if x == y then
                 E[e] = -1; changed = true
+                if first_only then return true, true end
             elseif (x == ra and y == rb) or (x == rb and y == ra) then
                 if st.Z[x] + st.Z[y] ~= ctx.total then
                     E[e] = -1; changed = true
+                    if first_only then return true, true end
                 end
             end
         end
@@ -333,98 +338,18 @@ local function fullProp(st, ctx)
 end
 
 -- ---------------------------------------------------------------------------
--- Tier 3: one-step trial on the edges at loose run ends.
--- ---------------------------------------------------------------------------
-
-local function frontierEdges(st, ctx)
-    local g, list, seen = ctx.g, {}, {}
-    for cell = 1, g.nc do
-        if st.T[cell] == 1 then
-            local y = ctx.ext[cell]
-            local edges = g.cellE[cell]
-            for i = 1, #edges do
-                if st.E[edges[i]] == 1 then y = y + 1 end
-            end
-            if y < 2 then
-                for i = 1, #edges do
-                    local e = edges[i]
-                    if st.E[e] == 0 and not seen[e] then
-                        seen[e] = true
-                        list[#list + 1] = e
-                    end
-                end
-            end
-        end
-    end
-    return list
-end
-
--- One trial: does assuming edge e yes (or no) run into a contradiction?
-local function trialFails(st, ctx, e, yes)
-    local c = clone(st)
-    if yes then
-        if not setYes(c, ctx, e) then return true, nil end
-    elseif not setNo(c, e) then
-        return true, nil
-    end
-    if not fullProp(c, ctx) then return true, nil end
-    return false, c
-end
-
--- A trial that ended without contradiction is remembered with its end
--- edges: while every edge decided since still agrees with them, rerunning it
--- would end the same way (the rules only deduce more from more), so it is
--- skipped. Skipping can only ever miss a deduction, never make a wrong one.
-local function stillAgrees(E, prev)
-    for e = 1, #E do
-        local v = E[e]
-        if v ~= 0 and v ~= prev[e] then return false end
-    end
-    return true
-end
-
--- Returns ok, changed. `pr` carries the scan position and the trial cache
--- across calls within one solve: the scan resumes after the edge that last
--- gave something (edges before it already failed to), and gives up once a
--- whole round of frontier edges has given nothing. Rescanning from the first
--- edge after every deduction is what made rare hard 10x10 grids crawl.
-local function probe(st, ctx, pr)
-    local ne = ctx.g.ne
-    local front = {}
-    for _, e in ipairs(frontierEdges(st, ctx)) do front[e] = true end
-    local cache = pr.cache
-    for _ = 1, ne do
-        local e = pr.cursor
-        pr.cursor = e % ne + 1
-        if front[e] and st.E[e] == 0 then
-            for side = 1, 2 do
-                local yes = side == 1
-                local key = yes and e or -e
-                local prev = cache[key]
-                if not (prev and stillAgrees(st.E, prev)) then
-                    local fails, ends = trialFails(st, ctx, e, yes)
-                    if fails then
-                        cache[key] = nil
-                        if yes then return setNo(st, e), true end
-                        return setYes(st, ctx, e), true
-                    end
-                    cache[key] = ends.E
-                end
-            end
-        end
-    end
-    return true, false
-end
-
--- ---------------------------------------------------------------------------
 -- Public solver API
 -- ---------------------------------------------------------------------------
 
--- Runs the tiers up to max_tier on `st` (modified in place) to a fixpoint.
--- Returns solved (bool), the highest tier actually needed, and the state.
+-- Runs the tiers up to max_tier (at most 2) on `st` (modified in place) to
+-- a fixpoint. Returns solved (bool), the highest tier actually needed, and
+-- the state. st.t2 counts the tier-2 steps: tier 2 rules out one edge at a
+-- time, then tier 1 runs dry again, so each step is something tier 1 could
+-- not see at that point. What is deduced does not depend on that order
+-- (every rule is sound and only narrows the grid), only the count is new.
 local function solveState(st, ctx, max_tier)
     local used = 1
-    local pr = { cursor = 1, cache = {} }
+    st.t2 = st.t2 or 0
     while true do
         if not propagate1(st, ctx) then return false, used, st end
         if isComplete(st) then
@@ -432,23 +357,22 @@ local function solveState(st, ctx, max_tier)
         end
         local progressed = false
         if max_tier >= 2 then
-            local ok, changed = l2pass(st, ctx)
+            local ok, changed = l2pass(st, ctx, true)
             if not ok then return false, used, st end
-            if changed then progressed = true; if used < 2 then used = 2 end end
-        end
-        if not progressed and max_tier >= 3 then
-            local ok, changed = probe(st, ctx, pr)
-            if not ok then return false, used, st end
-            if changed then progressed = true; used = 3 end
+            if changed then
+                progressed = true; st.t2 = st.t2 + 1
+                if used < 2 then used = 2 end
+            end
         end
         if not progressed then return false, used, st end
     end
 end
 
--- Solves by deduction only, using tiers up to max_tier.
--- Returns solved (bool), the highest tier actually needed, and the state.
+-- Solves by deduction only, using tiers up to max_tier (at most 2).
+-- Returns solved (bool), the highest tier actually needed, and the state
+-- (its t2 field: how many tier-2 steps).
 function S.solve(puz, max_tier)
-    max_tier = max_tier or 3
+    max_tier = max_tier or 2
     local ctx = context(puz)
     local st = initState(puz, ctx)
     if not st then return false, 0, nil end
@@ -656,7 +580,37 @@ function S.puzzleFromPath(n, path, entry_r, exit_c)
     }
 end
 
-S.TIER = { easy = 1, medium = 2, hard = 3 }
+S.TIER = { easy = 1, medium = 2, hard = 2 }
+
+-- What each level asks for (1.1.0):
+--   tier            the highest solver tier the grid needs
+--   min_t2, max_t2  how many tier-2 steps it needs (see solveState())
+-- Hard used to need one-step trials (a third tier), which is guessing. It
+-- is now tier 2 like Medium, with clearly more tier-2 steps; Medium gets a
+-- ceiling so the two do not overlap.
+--   attempts        how many paths to try; past it, the grid closest to
+--                   the window found so far is kept
+-- Hard windows are met by about 1 path in 7 to 1 in 17; an attempt is
+-- cheap (0.3 ms at 6x6 to 1.4 ms at 10x10 on a desktop), so the attempt
+-- counts keep the slowest grid near 40 ms (about 1 s on a Kobo).
+local MED_MAX    = { [6] = 1, [7] = 1, [8] = 2, [9] = 2, [10] = 3 }
+local HARD_MIN   = { [6] = 3, [7] = 3, [8] = 4, [9] = 5, [10] = 5 }
+local HARD_TRIES = { [6] = 120, [7] = 100, [8] = 70, [9] = 45, [10] = 28 }
+S.LEVELS = {
+    easy   = function(n) return { tier = 1, min_t2 = 0, max_t2 = 0, attempts = 12 } end,
+    medium = function(n) return { tier = 2, min_t2 = 1, max_t2 = MED_MAX[n] or 3,
+                                  attempts = 12 } end,
+    hard   = function(n) return { tier = 2, min_t2 = HARD_MIN[n] or 5, max_t2 = math.huge,
+                                  attempts = HARD_TRIES[n] or 28 } end,
+}
+
+-- How far a solved grid is from what the level asks for (0 = fits).
+local function miss(level, tier, t2)
+    if tier ~= level.tier then return 1000 + math.abs(tier - level.tier) end
+    if t2 < level.min_t2 then return level.min_t2 - t2 end
+    if t2 > level.max_t2 then return t2 - level.max_t2 end
+    return 0
+end
 
 -- The exhaustive cross-check gives up after this many search nodes; the grid
 -- is then discarded like one that is not unique, and the next attempt runs.
@@ -672,8 +626,9 @@ local function report(cb, attempt, inner)
     if cb then cb(1 - 0.5 ^ (attempt - 1) * (1 - inner / 2)) end
 end
 
--- Builds a puzzle needing exactly the difficulty's tier where it can.
--- Returns the puzzle and an info table { tier, givens, attempts }.
+-- Builds a puzzle that fits the difficulty's level (S.LEVELS) where it can.
+-- Returns the puzzle and an info table { tier, t2, givens, attempts, miss }
+-- (miss > 0: no attempt fitted, this is the closest one).
 --
 -- Givens are added (cells the stuck solver could not settle) until the grid
 -- is solvable within the tier, then removed again one at a time while it
@@ -687,8 +642,11 @@ end
 -- clock), so a seed always gives the same grid.
 function S.generate(n, difficulty, opts)
     opts = opts or {}
-    local target = S.TIER[difficulty] or 1
-    local max_attempts = opts.max_attempts or 12
+    local level = (S.LEVELS[difficulty] or S.LEVELS.easy)(n)
+    if opts.min_t2 then level.min_t2 = opts.min_t2 end
+    if opts.max_t2 then level.max_t2 = opts.max_t2 end
+    local target = level.tier
+    local max_attempts = opts.max_attempts or level.attempts or 12
     local on_progress = opts.on_progress
     local best, best_info
     for attempt = 1, max_attempts do
@@ -747,15 +705,16 @@ function S.generate(n, difficulty, opts)
                 if not (ok and solveState(t, ctx, target)) then puz.given[cell] = m end
                 report(on_progress, attempt, 0.3 + 0.6 * k / #cells)
             end
-            local _, tier = S.solve(puz, target)
+            local _, tier, fst = S.solve(puz, target)
+            local m = miss(level, tier, fst.t2)
             -- The exhaustive count is the expensive part of a rare grid: only
             -- run it on a grid that would be kept.
-            if (tier == target or not best or tier > best_info.tier)
+            if (not best or m < best_info.miss)
                     and S.countSolutions(puz, 2, S.COUNT_NODE_BUDGET) == 1 then
                 local ngiven = 0
                 for _ in pairs(puz.given) do ngiven = ngiven + 1 end
-                local info = { tier = tier, givens = ngiven, attempts = attempt }
-                if tier == target then
+                local info = { tier = tier, t2 = fst.t2, givens = ngiven, attempts = attempt, miss = m }
+                if m == 0 then
                     report(on_progress, attempt, 1)
                     return puz, info
                 end
@@ -770,7 +729,7 @@ function S.generate(n, difficulty, opts)
     for _, p in ipairs(path) do
         puz.given[(p[1] - 1) * n + p[2]] = puz.solution[p[1]][p[2]]
     end
-    return puz, { tier = 1, givens = #path, attempts = max_attempts }
+    return puz, { tier = 1, t2 = 0, givens = #path, attempts = max_attempts, miss = 0 }
 end
 
 return S

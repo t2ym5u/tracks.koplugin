@@ -84,7 +84,7 @@ describe("Tracks solver", function()
             local n = 6 + seed % 5
             local diff = ({ "easy", "medium", "hard" })[seed % 3 + 1]
             local puz = Solver.generate(n, diff)
-            local solved, _, st = Solver.solve(puz, 3)
+            local solved, _, st = Solver.solve(puz, 2)
             assert.is_true(solved)
             -- Every cell's track/empty status matches the answer.
             for r = 1, n do
@@ -112,6 +112,60 @@ describe("Tracks solver", function()
                 end
             end
         end
+    end)
+
+    -- 1.1.0: Hard used to need one-step trials ("assume an edge, see it
+    -- break"), which is guessing. No level may need more than tier 2 now.
+    it("no level needs trial and error (30 seeds per size and level)", function()
+        for _, n in ipairs({ 6, 7, 8, 9, 10 }) do
+            for _, diff in ipairs({ "easy", "medium", "hard" }) do
+                for seed = 1, 30 do
+                    math.randomseed(seed * 7919 + n)
+                    local puz, info = Solver.generate(n, diff)
+                    assert.is_true(info.tier <= 2)
+                    local ok, _, st = Solver.solve(puz, 2)
+                    assert.is_true(ok, ("%dx%d %s seed %d"):format(n, n, diff, seed))
+                    assert.are.equal(info.t2, st.t2)
+                end
+            end
+        end
+    end)
+
+    -- 1.1.0: Hard is tier 2 like Medium, with clearly more tier-2 steps,
+    -- and Medium has a ceiling, so the levels do not overlap.
+    it("Easy < Medium < Hard in tier-2 steps, every size", function()
+        for _, n in ipairs({ 6, 7, 8, 9, 10 }) do
+            local sum = { easy = 0, medium = 0, hard = 0 }
+            local med_max, hard_min, fit = 0, math.huge, 0
+            local K = 20
+            for seed = 1, K do
+                for _, diff in ipairs({ "easy", "medium", "hard" }) do
+                    math.randomseed(seed * 31 + n)
+                    local _, info = Solver.generate(n, diff)
+                    sum[diff] = sum[diff] + info.t2
+                    if info.miss == 0 then fit = fit + 1 end
+                    if diff == "medium" then med_max = math.max(med_max, info.t2) end
+                    if diff == "hard" then hard_min = math.min(hard_min, info.t2) end
+                end
+            end
+            assert.are.equal(0, sum.easy)
+            assert.is_true(sum.medium >= K)
+            assert.is_true(sum.hard >= 2 * sum.medium, ("%d: %d vs %d"):format(n, sum.hard, sum.medium))
+            assert.is_true(hard_min > med_max, ("%d: hard %d, medium %d"):format(n, hard_min, med_max))
+            assert.is_true(fit >= 3 * K - 2)
+        end
+    end)
+
+    it("builds 10x10 Hard within a generous bound", function()
+        local worst = 0
+        for seed = 1, 10 do
+            math.randomseed(seed * 101)
+            local t0 = os.clock()
+            Solver.generate(10, "hard")
+            worst = math.max(worst, os.clock() - t0)
+        end
+        -- about 25 ms at worst on a desktop under LuaJIT
+        assert.is_true(worst < 1.0, ("took %.2f s"):format(worst))
     end)
 
     it("row and column clues add up to the same total", function()
@@ -275,6 +329,25 @@ describe("TracksBoard", function()
         assert.is_true(b2:canUndo())
         assert.is_false(Board:new():load(nil))
         assert.is_false(Board:new():load({ n = 6 }))
+    end)
+
+    -- 1.1.0 changed how Hard grids are built; a game saved by 1.0.x (here a
+    -- hand-made Hard-style grid with no given piece, mid-game) must still
+    -- load and be won.
+    it("loads a game saved by 1.0.x and plays it to the end", function()
+        math.randomseed(5)
+        local path, er, ec = Solver.randomPath(8)
+        local puz = Solver.puzzleFromPath(8, path, er, ec)
+        local b = Board:new{ n = 8 }
+        b.entry_r, b.exit_c = er, ec
+        b.row_clues, b.col_clues, b.solution = puz.row_clues, puz.col_clues, puz.solution
+        local data = b:serialize()
+        data.difficulty = "hard"
+        local b2 = Board:new()
+        assert.is_true(b2:load(data))
+        assert.are.equal("hard", b2.difficulty)
+        playSolution(b2)
+        assert.is_true(b2:checkWin())
     end)
 
     it("saving does not stop the clock", function()
