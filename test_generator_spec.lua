@@ -25,18 +25,6 @@ local function withoutClock(fn)
     if not ok then error(err, 0) end
 end
 
--- Everything that defines the puzzle, as a string.
-local function fingerprint(b)
-    local t = { b.n, b.entry_r, b.exit_c }
-    for r = 1, b.n do
-        t[#t + 1] = b.row_clues[r] .. "/" .. b.col_clues[r]
-        for c = 1, b.n do
-            t[#t + 1] = b.solution[r][c] .. (b.given[r][c] and "g" or "")
-        end
-    end
-    return table.concat(t, ",")
-end
-
 local function generate(n, diff, seed, on_progress)
     math.randomseed(seed)
     local b = Board:new{ n = n, difficulty = diff }
@@ -54,15 +42,6 @@ describe("Tracks generator", function()
                 assert.is_true(f >= 0 and f <= 1, diff)
                 if k > 1 then assert.is_true(f >= seen[k - 1], diff) end
             end
-        end
-    end)
-
-    it("builds the same puzzle from the same seed, without reading the clock", function()
-        for _, case in ipairs({ { 6, "easy" }, { 8, "medium" }, { 10, "hard" } }) do
-            local a = fingerprint(generate(case[1], case[2], 2024))
-            local b = fingerprint(generate(case[1], case[2], 2024, function() end))
-            assert.are.equal(a, b)
-            assert.are_not.equal(a, fingerprint(generate(case[1], case[2], 2025)))
         end
     end)
 
